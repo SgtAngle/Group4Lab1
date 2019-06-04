@@ -1,0 +1,879 @@
+---
+title: '**Rules on Rules from Rules:** Using Association Rules Mining to Link Categorical Variables of Board Game Rules to Positive or Negative Critical Reception'
+author: "Aaron Fehir, Shawn Mills, Steven Too Heng Kwee"
+output:
+  html_document:
+    code_folding: hide
+    theme: readable
+    toc: yes
+    toc_float:
+      smooth_scroll: yes
+      toc_depth: 2
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+** _NOTE: "database.sqlite","final_clean_boardgame.csv" and "boardgame_data_with_expanded.csv" are required to run the Rcode. Please download from https://github.com/SgtAngle/Group4Lab1 _**   
+
+
+## Abstract 
+ This paper contains information on the development of three association rules mining algorithms (apriori, FPGrowth, and eclat) which were applied to the largest boardgame database in the world. The goal was to boost the usefulness of categorical and mechanical observations in a previously constructed binary classification model, which predicted whether a boardgame would receive above or below average ratings on boardgamegeek.com. Specifically, though the individual dummy variables for categories and mechanics might not have been confidently related to the average score, initially, it is hoped that using association rules between several of the features and then feature engineering binary columns based off of these rules would increase the predictive capacity of the SVM model. To return for a moment to the importance of the above or below average ratings, it functions as a good proxy for the commercial success of a game. This is useful in that, without playing the game, and ideally without reading the rules, being able to predict the critical reception allows you to prioritize some submissions and discard others, thereby significantly reducing  the time spent processing rules submissions, and increasing the odds that new submissions which would be successful are picked up before the competition can  accept them,  and/or  decreasing overhead for this process.
+
+
+
+# Introduction / Business Understanding
+
+ In this scenario, a fictitious boardgame company, Cardboard Kings (CK), is swamped with submissions for ideas to make new games, with the sheer number being such that they are concerned that potentially lucrative designs might slip through their fingers.  With the increased popularity of boardgames in recent years, this is a reasonable fear; struggles for market share have become increasing tense, and game designers -- especially new or first-time designers --- often pitch their designs to multiple companies (Browne, 2017, Martin 2017)). As a result, the ability to sort "the wheat from the chaff" as fast as possible is extremely valuable for board game companies. In fact, depending on the size of the company, publishing one or two hits in a year is the difference between thriving and bankruptcy (Woods, 2012). As a result, an SVM model was created to predict this variable. This model performed well, with above 80 % specificity and sensitivity, but CK felt that it underutilized the categorical and mechanical variables, and that creating association ruleset between these variable and the critical reception might allow for increased effectiveness via feature engineering.
+ 
+ 
+Phrased as a Business Problem:
+**Can association rules mining discover which pairings of categories and mechanics are linked with “good” games and which are linked with “bad” games?**  
+
+## Data Understanding and Preparation
+
+While it would certainly be possible to phrase this as a regression problem designed to predict the average rating a game will receive on boardgamegeek.com, a more reliable translation of this business problem into an analytics problem is using asscoiation rules to aid in prediction via  binary classification. Specifically, can a model reliably (at least 80% of time, as measured by specificity and sensitivity) correctly predict whether a design submission will be above or below the average game on boardgamegeek.com $(x < 6. 9 | x > 6.9)$, using categorical and numeric design-decisions as features? If successful, sorting new designs with this model could potentially halve the amount of work needed to review the same design-input, or make CK's current review process twice as fast, depending on one's outlook. A priori assumptions are that as time increases, the frequency of boardgame production increases, boardgames become more complex, and that ratings improve.
+
+## Original Data and Pre-emptive Dimensional Reduction 
+
+As stated in the abstract, the database used for this project was scraped in 2016 from [boardgamegeek.com (BBG)](https://boardgamegeek.com/), which is the largest boardgame enthusiast site/ database in the world. This was done by Baldassare (2017) for the purposes of market segmentation, it was later uploaded to Kaggle, which is where it was [downloaded](https://www.kaggle.com/gabrio/board-games-dataset) for this project.  After importing the data from it's initial SQLite format, the data was coerced into a data.frame composed of 90, 400 observations , and 80 features.  For a complete list of the initial features, which were fairly evenly split between <chr> and <dbl>,  see fig 1. Many of these features, including the majority of the polling features, and all stats located [, 44:54] were discarded immediately, as they were missing a substantial portion of their values (see fig 2), and not relevant to the business question; CK would not have access to the community's response to a game's design prior to publication. Additionally, all features beginning with stats.family were removed, as was anything that made the database semi-structured, like the attributes.t.links.., details.thumbnail, and details.image features. The game.description feature was also removed for this reason, since it both required  natural language processing to become workable, and didn't directly relate to design features. The game.type feature and  attributes.boardgameexpansion were also removed, but not before they were used to help refine the dataset, as they allowed arcade/computer games and boardgame expansions to be removed, which prevented over-representation of mechanics and categories shared by an original game, and its expansions. 
+
+```{r, include=FALSE}
+#let's get those libraries up and running ###
+library(tidyverse)
+library(RSQLite)
+library(corrplot)
+library(splitstackshape)
+library(caret)
+library(e1071)
+library(stats)
+library(rpart)
+library(RColorBrewer)
+
+## connect to db. Please select the "database.sqlite" file.
+# con <- dbConnect(drv=RSQLite::SQLite(), dbname=choose.files())
+con <- dbConnect(drv=RSQLite::SQLite(), dbname="./database.sqlite")
+
+# list all tables
+tables <- dbListTables(con)
+
+# exclude sqlite_sequence (contains table information)
+tables <- tables[tables != "sqlite_sequence"]
+
+lDataFrames <- vector("list", length=length(tables))
+
+# create a data.frame for each table
+for (i in seq(along=tables)) {
+  lDataFrames[[i]] <- dbGetQuery(conn=con, statement=paste("SELECT * FROM '", 
+                                                           tables[[i]], "'", sep=""))
+}
+
+## okay,all of the tables that aren't lDataFrames[[1]] are included within table one, so I'm
+## going to ignore them, and focus on lDataFrames[[1]] ### 
+boardgame_data <- lDataFrames[[1]]
+```
+
+Figure 1: Dataset initial features list
+```{r}
+
+## let's take a quick look ## 
+
+# glimpse(boardgame_data)
+# dim(boardgame_data)
+# class(boardgame_data)
+colnames(boardgame_data)
+```
+
+```{r, include=FALSE}
+##Okay, and how much data is missing? ## 
+#summary(is.na(boardgame_data))
+dat_missing <- colMeans(is.na(boardgame_data))
+#summary(dat_missing)
+```
+
+Figure 2: Missing data by feature
+```{r}
+barplot(dat_missing, las=3, cex.names = .58, 
+        ylab = "Proportion of Data Missing", ylim = c(0, 1))
+
+##okay, wow, that't a lot of missing data. A lot of it seems to be for user-generated
+## variables, like poll data, user comments, things like that, so lets remove 
+## most of that ##
+```
+
+## Intermediate Data and Pre-Processing 
+
+After the initial dimensional reduction, and some of the data verification discussed in the Modelling and Evaluation  section,  the data file was 4083 observations by 18 features, see Table 1. A few of these features were kept in with the intension of discarding them immediately after using them to help detect outliers (such as `users.rated`), while others (particularly `polls.language dependence`) were  intended to be used as features to assess design decisions.  Though not shown in Table 1, for clarity reasons, the dummy variables for mechanics and category were also created during this stage using `cSplit_e ()` from the `splitstackshape` library (ee figs 8 and 9)  and for detailed descriptions of their meanings, consult BBG (BoardGameGeek, n.d.)
+
+Table 1: Final features list
+```{r}
+col_keep <- c("game.id", "details.name", "details.maxplayers",
+              "details.minage", "details.yearpublished", 
+              "stats.average","details.minplayers", "details.minplaytime",
+              "details.maxplaytime", "polls.language_dependence" ,
+              "stats.subtype.boardgame.bayesaverage", "stats.subtype.boardgame.pos", 
+              "attributes.boardgameartist", "attributes.boardgamecategory", 
+              "attributes.boardgamedesigner", "attributes.boardgamemechanic",
+              "stats.average", "stats.averageweight", "stats.usersrated")
+col_keep
+```
+
+```{r, include=FALSE}
+#Also, while we are at it, let's remove video-games, and boardgame expansions ### 
+
+game_data_clean <- boardgame_data %>% 
+  filter(game.type == "boardgame", attributes.boardgameexpansion != TRUE) %>% # 
+  select(col_keep)
+
+#glimpse(game_data_clean)
+
+boardgame_data_clean <- boardgame_data %>% 
+  filter(game.type == "boardgame", attributes.boardgameexpansion != TRUE) %>% # 
+  select(col_keep)
+
+#head(boardgame_data_clean)
+
+boardgame_data_clean$game.id <- as.integer(boardgame_data_clean$game.id)
+
+dat_missing <- colMeans(is.na(boardgame_data))
+
+clean_data_missing <- colMeans(is.na(boardgame_data_clean))
+
+
+# the names of the games are important, but let's get them out of the way by turning them 
+# into rownames. 
+rownames(boardgame_data_clean) <- make.names(boardgame_data_clean$details.name, unique=TRUE)
+boardgame_data_clean <- boardgame_data_clean %>% 
+  select(-details.name)
+
+## lets take a look at the dates, and see if they all line up, starting with year 
+## of publication. 
+
+#summary(boardgame_data_clean$details.yearpublished)
+#summary(game_data_clean$details.yearpublished)
+
+## Min is -3000, which I'm not keen on, lets look into that, and then remove everything ## 
+## from earlier than 1800 ## 
+
+early_games <- boardgame_data_clean %>%
+  filter (details.yearpublished < 1900)
+
+#summary(early_games)
+
+##  okay there's a lot of clasics, like chess, and Go here, but also alot of unknown games.
+##  As you can't really bank on creating a classic on the scale of Backagammon, and these
+##  early games are going to throw off EDA, let's remove them from our data-set
+
+boardgame_data_clean <- boardgame_data_clean %>% 
+  filter (details.yearpublished > 1900)
+
+#plot(details.yearpublished ~., boardgame_data_clean)
+
+## Okay, that's a little better, there are still some massive outliers though, ## 
+## particularily in minimum play time ## 
+#plot(details.yearpublished ~ details.minplaytime, boardgame_data_clean, log = "x")
+
+#boxplot(bdc6$details.maxplaytime ~  bdc6$stats.average)
+ # + ab_line(h=6.9)
+
+##from personal experience, I know that the min.playtime for anything with critical
+### reception is going to be less than 12 hours, with most games clocking in at 2-4, 
+## and several heavier games around  the 5-10 mark.  So I'm going to remove anything 
+## tha lasts longer than the large grouping before 1000 minutes, and I'm going to drop 
+## the log scaling to make getting that cut-off number easier. 
+
+# plot(details.yearpublished ~ details.minplaytime, game_data_clean, xlim = c(100,1000), ylim = c(1940, 2020))
+
+##Okay, this confirms what I was thinking, so lets remove anything 
+## that takes more than 600 minutes to play and anything that takes less than a minute 
+
+boardgame_data_clean <- boardgame_data_clean %>% 
+  filter (details.minplaytime <= 600, details.minplaytime >1) %>%
+  filter (details.maxplaytime > 1, details.maxplaytime < 600)
+
+# great! # 
+
+## Still some weird stuff though. Neither the Mininum number of players, 
+## nor the maximum number of players can actually be '0', so lets remove those 
+
+boardgame_data_clean <- boardgame_data_clean %>% 
+  filter (details.minplayers > 0, details.maxplayers > 0)
+
+```
+
+
+## Final Data and Feature Engineering 
+
+After adding the dummy variables (see fig 8 and 9), the number of features climbed to 150.  This would continue to increase, as, during EDA, five additional features were engineered. These were:
+
+  1) the total number of mechanics used in a given game [Mechanic Sum, AKA `mech_sum`], 
+
+  2) mech_sum's categorical counterpart: the total number of categories a given game fell into [Category Sum,  AKA `cat_sum`],
+
+  3) The amount of variation in player-count which a board game could accommodate [maxplayer - minplayer AKA Player-Spread AKA `player_spread`] , 
+
+  4)  the amount of variation in the time required to play a game [(maxplaytime - minplaytime) AKA Time-Spread  AKA `time_spread`], and 
+
+  5) a categorical variable which  stores information of whether a game was rated above or below average [`successful`].
+
+The former two were produced to try and capture how innovative the game design was,, while the latter two attempted to assess a game's versatility. 
+ 
+In order to combat the results of including a high number of features --- high computational time, and features which added noise without adding accuracy or precision, --- the number of categorical features was significantly reduced by an iterative importance-check / feature-removal carried out during implementation of the Random Forest model. Altogether, the finished dataframe was 2869 observations by 54 features, with the final features summarized in fig 3, and all features classified as either `<int>` or `<dbl>`, which are largely interchangeable. 
+
+## Verifying Data Quality 
+
+After deciding on which features would initially be included in the data file, the data quality of the dataframe was assessed using several methods. Firstly, `distinct_n()` was checked against `n()`  using the summary function of dplyr for both `game.id` and `game.name` to check for duplicates, since they can both theoretically function as a primary index. As the values matched, duplication was determined to be absent. 
+
+Next, non-NA-missing-values and outliers were scanned for by passing the dataframe through the summary function, and manually looking for unusual qualities. This was complimented by passing questionable features into the plot function. Zero weight games were obviously outliers (see Fig 4), likely from missing values, so observations with [average.weight = 0 ] were filtered out of the dataset. Games published before 1900 were also removed, as they contained a few classics like Chess and Backgammon, but with values as low as -3000, their inclusion was heavily throwing off visual EDA, and they weren't useful for answering the business question. Games with minimum and/or maximum payer counts of 0 were also removed, as there can't be zero people playing the boardgame, making 0 an invalid input. Board games that required less than 11 or more than 600 minutes to play were deemed outliers, and discarded. Finally, any game with fewer than 20 user ratings (see fig 5) were removed, as low user ratings on BBG are indicative of unpublished games or rule variations on existing games, in the author's experience. 
+
+
+```{r, include=FALSE}
+
+#summary(boardgame_data_clean)
+
+#hist(bdc6$details.yearpublished, breaks = 60, 
+#     main = "Temporal Distribution of Boardgame Publication", xlab= "Year Published")
+
+#hist(bdc6$stats.averageweight, breaks = 20, 
+#     main = "Distribution by  Boardgame Weight", xlab= "Boardgame Weight")
+#summary(bdc6$stats.averageweight)
+
+#goody_weighty <- lm(stats.average~stats.averageweight, bdc6)
+#goody_weighty 
+#plot(stats.average~stats.averageweight, bdc6, xlab = " Weight", ylab = "Average Rating", 
+#     main = "Relationship between Complexity and Ratings") + 
+# abline ( reg = goody_weighty, col = "red")
+
+#summary(bdc6$details.yearpublished)
+
+#So, how about this minimum age of 0, is that an error? 
+
+#plot(boardgame_data_clean$details.minage)
+#sum(boardgame_data_clean$details.minage == "0")
+##251 games fall into this category, 
+
+# okay, so it seems like minimum ago of zero might be a filler for games where the 
+# minimum age isn't declared. 
+
+#I'm going to print the name of games that fall into this category and see if I reognize 
+# any, and see if it's temporally related. 
+
+no_age_games <-  boardgame_data_clean %>%
+  filter(boardgame_data_clean$details.minage == "0")
+
+#summary(no_age_games)
+
+## distribution of publication year seems to match larger dataset. but the users rated
+## seems much lower, which leads me to belive a lot of these are self-published or variants
+## of existing games. Let's remove eveything with less than 20 user ratings since we 
+## need to do that anyways, and it'll help us est the 'unpublished hypothesis'.
+
+boardgame_data_clean <-  boardgame_data_clean %>%
+  filter(stats.usersrated >= 20)
+
+#summary(boardgame_data_clean)
+
+no_age_games <-  boardgame_data_clean %>%
+  filter(boardgame_data_clean$details.minage == "0")
+
+#summary(no_age_games)
+
+##looks like we cut out about 100 games by removing the ones without ratings, but we 
+## have about 150 legitimate games that have invalid minimum player ages, let's return 
+## to that later
+```
+Figure 4: Assessing the Validity of Zero-Weight Games
+```{r}
+##let's see if complexity weights of 0 are also fillers 
+
+plot(boardgame_data_clean$stats.averageweight, main = "Assessing the Validity of 0 Weight Games", 
+     ylab = "Average Weight")
+
+## Okay, that's DEFINITELY  the case, so let's remove them 
+boardgame_data_clean <-  boardgame_data_clean %>%
+  filter(stats.averageweight >= 1)
+
+#summary(boardgame_data_clean)
+#dim(boardgame_data_clean)
+```
+Figure 5: Using Number of User Ratings to Filter out Fan-Made Rule Variations
+```{r}
+plot(details.yearpublished ~stats.usersrated, game_data_clean, log = "x", 
+     ylim = c(1975,2020), xlab = "Users Rated (log)", ylab = "Year Published", 
+     main = "Using User Rating to Filter out Fann-made Variations") + 
+      abline(v= 20, col = "red", cex = 2)
+```
+
+```{r, include=FALSE}
+
+clean_data_missing <- colMeans(is.na(boardgame_data_clean))
+#barplot(clean_data_missing)
+
+#plot(details.yearpublished~., boardgame_data_clean)
+
+## Let's also remove anythng without mechanics or category ## 
+
+#bad_cat <- dplyr::filter(boardgame_data_clean,  !is.na(attributes.boardgamecategory))
+#bad_mech <- dplyr::filter(boardgame_data_clean,  !is.na(attributes.boardgamemechanic))
+
+#boardgame_data_clean2 <-  boardgame_data_clean %>%
+#  filter(-badcat)
+
+# for reasons discussed in the paper, I'm removing boardgame artist and designer. 
+#  language dependance is being removed because there are too many missing values 
+boardgame_data_clean <-  boardgame_data_clean %>% 
+  select(-polls.language_dependence,-attributes.boardgameartist, 
+         -attributes.boardgamedesigner)
+
+bdc_stats <- boardgame_data_clean
+
+#bgd_clean <-  boardgame_data_clean %>% 
+#              str_to_lower(.)
+#str_replace(colnames(boardgame_data_clean), ".", "_") %>% 
+#              str_replace(colnames(boardgame_data_clean), "attributes", "") %>% 
+#              str_replace(colnames(boardgame_data_clean),"stats", "") %>%
+#              str_replace(colnames(boardgame_data_clean),"boardgame", "") %>%
+#              str_replace(colnames(boardgame_data_clean),"polls", "") 
+
+## let's try to get the categorical variables up and running starting with categories"
+
+#mechanic_with_dummies <- cSplit_e(data, "attributes.boardgamemechanic", type="character", fill=0, drop=TRUE)
+#category_with_dummies <- cSplit_e(data, "attributes.boardgamecategory", type="character", fill=0, drop=TRUE)
+mechanic_with_dummies <- cSplit_e(boardgame_data_clean, "attributes.boardgamemechanic", type="character", fill=0, drop=TRUE)
+category_with_dummies <- cSplit_e(boardgame_data_clean, "attributes.boardgamecategory", type="character", fill=0, drop=TRUE)
+
+
+boardgame_data_clean <- cSplit_e(boardgame_data_clean, "attributes.boardgamemechanic", type="character", fill=0, drop=TRUE)
+boardgame_data_clean<- cSplit_e(boardgame_data_clean, "attributes.boardgamecategory", type="character", fill=0, drop=TRUE)
+
+bdcexp_stats <- boardgame_data_clean
+#write_csv(boardgame_data_clean, "boardgame_data_with_expanded.csv")
+
+```
+## Summary listing of Data preparation and cleanup
+As decribed previously, only 18 variables were kept from the source data. We are left with 3050 records meeting the following criterion.
+
+- yearpublished > 1900
+- minplaytime and maxplaytime must be 1 to 600 minutes
+- minplayers and maxplayers must be more that 0
+- minage not null or 0
+- usersrated >=20
+- averageweight >=1
+- boardgamecategory and boardgamemechanic not null
+
+
+## Descriptive Statistics for Important Features 
+```{r}
+hist(bdc_stats$stats.average, main = "Distribution of Average Ratings", 
+     xlab = "Average Rating", breaks = 40)
+summary(bdc_stats$stats.average)
+```
+Figure 6: Univariate Distribution of Average Rating
+
+As average rating is the parent input for the primary classification variable, it was examined first, via histogram specifically, in order to assess its distribution univariately. Overall, average rating was unimodal, following an extremely gaussian curve. it's left tail is slightly denser than its right tail, and it is centred, not surprisingly, around 6.8, which is its median and mean. Observations less than 6.9 will be considered below average, while those greater than 6.9 will be considered above average. 
+
+```{r}
+hist(bdc_stats$details.yearpublished, breaks = 60, 
+     main = "Temporal Distribution of Boardgame Publication", xlab= "Year Published")
+summary(bdc_stats$details.yearpublished)
+```
+Figure 7:Increase of Boardgame Publication
+
+Observing the histogram of the publication year feature, it's quite clear that the majority of the games in this dataset are published in the late 2000's or later. This mirrors the expected explosion during the boardgame renaissance but may also reveal that board games from before the 2000's, especially those published before the 1980', are underrepresented. The severe drop-off in frequency post-2016 is owed to the fact that this dataset was scrapped in 2016, making anything more recent than that estimated-data.
+
+```{r}
+hist(bdc_stats$stats.averageweight, breaks = 20, 
+     main = "Distribution by  Boardgame Weight", xlab= "Boardgame Weight")
+summary(bdc_stats$stats.averageweight)
+```
+Figure 10: Distribution by Complexity 
+
+The majority of boardgames have a weight of between 1.75 and 2.9. There seems to be an unusually large uptick in frequency for games between 1.8 and 2.0. Frequency decreases quite steadily after a weight of 3.
+
+Number of Boardgames by Mechanic
+```{r}
+mechanic <- boardgame_data_clean %>%
+  select(starts_with('attributes.boardgamemechanic')) 
+
+colnames(mechanic) <- str_replace(colnames(mechanic), 
+                                  "attributes.boardgamemechanic_", 
+                                  "")
+mechanic_count <- apply(mechanic,2,sum)
+mechanic_count <- sort(mechanic_count, decreasing = TRUE)
+mechanic_count
+
+barplot(mechanic_count, names.arg = FALSE, main = "Distribution of Games by Count of Mechanics") 
+```
+
+Figure 8: Count of Boardgames by Mechanics
+
+There were 52 mechanics in the dataset. "Dice Rolling", "Hand Management"             "Variable Player Powers", "Modular Board" , "Set Collection",  "Card Drafting"     
+"Hex-and-Counter" ,"Area Control / Area Influence", "Action Point Allowance System" ,"Tile Placement"  were the most popular. The decrease in frequency is much more gradual than seen in categories (see fig 8)          
+
+Count of Boardgames by Category 
+```{r}
+category <- boardgame_data_clean %>%
+  select(starts_with('attributes.boardgamecategory'))
+  
+colnames(category) <- str_replace(colnames(category), 
+            "attributes.boardgamecategory_", 
+            "")
+category_count <- apply(category, 2,  sum)
+category_count <- sort(category_count, decreasing = TRUE)
+category_count
+
+barplot(category_count, names.arg = FALSE, main = "Distribution of Games by Count of Categories") 
+```
+
+Figure 9: Count of Boardgames by Category
+
+There were 94 categories of boardgame. The ten most popular categories were Card Game, Wargame, Fantasy, Fighting, Science Fiction, Miniatures, Dice, Economic, World War II, and Adventure (see fig 9) . Holding multiple categories was less common than holding multiple mechanics. 
+
+## Relationships Between Other Features and Average Rating  
+```{r, include=FALSE}
+plot <-  boardgame_data_clean %>% 
+  mutate(discrete_years=as.factor(plyr::round_any(as.numeric(details.yearpublished), 5))) %>%
+  mutate(discrete_weights=as.factor(plyr::round_any(as.numeric(stats.averageweight), .5))) %>% 
+  filter(as.numeric(details.yearpublished) >=1900 & as.numeric(details.yearpublished) <= 2016)
+
+```
+
+As average rating forms the backbone of the classification models used in this paper, it was certainly worthwhile to explore its relationship with some of the dataset's other important features. Importance was determined by both correlations discussed later, and functions directed at the Random Forest model. The important features are: minimum age, average weight, number of mechanics, time spread, maximum players, and year of publication.
+
+```{r}
+boxplot(boardgame_data_clean$stats.average~boardgame_data_clean$details.minage, 
+        main = "Relationship between Minimum Age and Average Rating \n(0 = No Minimum Age)",
+        ylab = "Average Rating", xlab = "Minimum Recommended Age")  
+        abline(h = mean(boardgame_data_clean$stats.average))
+```
+
+Figure 11:  Age Recommendations and Reception
+
+
+Boardgames without recommended ages seem to be preferred (see Fig 11), and board games with minimum ages under ten or over 15 seems to receive lower average ratings. 
+
+```{r}
+goody_weighty <- lm(stats.average~stats.averageweight, bdcexp_stats)
+plot(stats.average~stats.averageweight, bdcexp_stats, xlab = " Weight", ylab = "Average Rating", 
+     main = "Relationship between Complexity and Ratings") 
+  abline ( reg = goody_weighty, col = "red")
+  
+ggplot(plot, 
+       aes(discrete_weights, stats.average)) +
+  geom_boxplot(alpha=.4) +
+  theme_bw() +
+  ylab("Average Rating") + xlab("Binned Average Weight") +
+  geom_hline(yintercept=mean(plot$stats.average, na.rm=TRUE), color="black") +
+  theme(legend.position="none")
+```
+
+Figure 12: Relationship Between Complexity and Ratings
+
+Generally, as the complexity of a game increases, so does its rating, though this relationship becomes difficult to prove after a weight of 4, as the number of data points becomes quite sparse. 
+```{r}
+mech_only <- boardgame_data_clean %>%
+  select(starts_with("attributes.boardgamemech"))
+
+mech_only$mech_sum <- rowSums(mech_only)
+boardgame_data_clean$mech_sum <- mech_only$mech_sum
+
+boxplot(boardgame_data_clean$stats.average~boardgame_data_clean$mech_sum, 
+        main = "Relationship between Number of Mechanics and Average Rating",
+        ylab = "Average Rating", xlab = "Total Number of Mechanics") 
+        abline(h = mean(boardgame_data_clean$stats.average))
+```
+
+Figure 13:Relationship Between the Number of Mechanics and Average Rating
+
+Backing up the previous figure, as the number of mechanics present in a game increases, so does its probability of being an above average game. 
+```{r}
+just_stats <- boardgame_data_clean %>% 
+  select(-starts_with("attributes")) %>% 
+  mutate(player_spread = (details.maxplayers-details.minplayers)) %>% 
+  mutate(time_spread = (details.maxplaytime-details.minplaytime))
+
+boxplot (just_stats$stats.average ~just_stats$time_spread,
+         main="Averge Rating by Time Spread", xlab="Time Spread (in minutes)", 
+         ylab = "Average Rating") 
+  abline( h = mean(boardgame_data_clean$stats.average))
+```
+
+Figure 14 : Relationship between the Variability of Playtime and Average Rating 
+
+Generally, the more variable the time required to play a game the more popular.
+
+```{r}
+boxplot (boardgame_data_clean$stats.average ~boardgame_data_clean$details.maxplayers,
+         main="Averge Rating by Maximum Players", xlab="Maximum Players", 
+         ylab = "Average Rating")
+  abline( h = mean(boardgame_data_clean$stats.average))
+```
+
+Figure 15: Relationship Between Maximum Player count and Average Ratings
+
+Games with up to (but no more than) five players are more likely to be above-average.
+
+```{r}
+boxplot(stats.average ~  discrete_years, data = plot,
+        xlab = "Year of Publication (5 year groups)", ylab = "Average Rating ", 
+        main = "The Relationship between Boardgame Ratings and Time") 
+  abline( h = mean(plot$stats.average))
+```
+
+Figure 16: The Relationship Between Boardgame Ratings and Time 
+
+The mean scores for games increase over time. Games from before 1970 were (except for one) ill-regarded by BBG users, while games after 2010 were more likely than not to be above average. 
+
+
+# Modeling and Evaluation: Association Rules Mining
+
+## Apriori Model
+The first model attempted for association analysis was the Apriori model.  This model, as it appears in R’s arules library, for our purposes requires all factors that will be used in generating itemsets be set up in their own columns with TRUE/FALSE values indicating their presence in each row.  To simplify the analysis, the average rating of each game was grouped according to score:
+
+  *	Good = scores higher than 7
+  *	Fair = scores between 5 and 7
+  *	Poor = scores less than 5
+
+The Apriori implementation in arules allows for filtering of consequent factors.  As a result, we were able to restrict the analysis in this model to only itemsets where the consequent factors were the categorized scores and see what combination of game categories and mechanics were associated with each category of scores.  With 133 total game category and mechanic factors, and only 3082 rows, the number of appearances of each combination of factors was potentially going to be quite low.  Support levels were mostly found to be well below 0.2 for all resulting rules built from the itemset, but there were a small cluster of rules for games rated as “Good” that appeared fairly frequently (Support > 0.29).  However, with Confidence scores just slightly over 0.5 and Lift scores hovering around 1.15, it appears these rules would only produce a “Good” rated game with the frequency of a coin toss.
+
+```{r, include=FALSE}
+if(! "arules" %in% installed.packages()) install.packages("arules", depend = TRUE)
+if(! "arulesViz" %in% installed.packages()) install.packages("arulesViz", depend = TRUE)
+#if(! "rCBA" %in% installed.packages()) install.packages("rCBA", depend = TRUE)
+
+library(arules)
+library(arulesViz)
+#library(rCBA) does not exist for R version 3.5.1
+
+# import the boardgame_data_with_expanded.csv source file
+dat <- read.csv(file="./boardgame_data_with_expanded.csv")
+#dim(dat)
+#str(dat)
+#summary(dat)
+
+########################################################################################################
+# Attempt 7 - use all attributes only, associate with average category (good >7, fair 5-7, poor <5), customize parameters
+########################################################################################################
+########################################################################################################
+# in order to use apriori, change the attributes to factors
+dat_factors <- NULL
+dat_factors$stats.average = dat$stats.average
+
+# assign categories instead of values to stats.average
+dat_factors$stats.average[dat_factors$stats.average < 5] <- "Poor"
+dat_factors$stats.average[dat_factors$stats.average < 7] <- "Fair"
+dat_factors$stats.average[dat_factors$stats.average < 9.999] <- "Good"
+
+# add the category and mechanic attribute info
+dat_factors <- cbind(dat_factors,  dat[,grep("attributes.", colnames(dat))])
+dat_factors$stats.average <- as.factor(dat_factors$stats.average)
+dat_factors[sapply(dat_factors, is.integer)] <- lapply(dat_factors[sapply(dat_factors, is.integer)], as.factor)
+
+# check the dataframe
+#dim(dat_factors)
+#str(dat_factors)
+#summary(dat_factors)
+
+# code to show the rules across all averages
+#rules<-apriori((dat_factors),parameter=list(minlen=2,support=0.6,confidence=0.6,target="rules",maxtime=20,maxlen=4), 
+#               appearance = list(rhs=c("stats.average=Poor","stats.average=Fair","stats.average=Good")))
+```
+
+```{r}
+names(dat_factors) <- gsub("attributes.boardgame", "", names(dat_factors))
+names(dat_factors) <- gsub("mechanic", "m", names(dat_factors))
+names(dat_factors) <- gsub("category", "c", names(dat_factors))
+# dat
+
+# code to show the rules across all averages
+# rules<-apriori((dat_factors),parameter=list(minlen=2,support=0.6,confidence=0.6,target="rules",maxtime=20,maxlen=5), 
+#               appearance = list(rhs=c("stats.average=Poor","stats.average=Fair","stats.average=Good")))
+
+# determine the most likely rules for Good games
+rules<-apriori((dat_factors),parameter=list(minlen=4,support=0.012,confidence=0.75,target="rules",maxtime=15,maxlen=10), 
+               appearance = list(rhs=c("stats.average=Good", "stats.average=Poor")))
+
+str(rules)
+rules_sorted <- sort(rules, by="lift")
+
+slim_rules_sorted <- rules_sorted[1:50, ]
+
+
+#plot(slim_rules_sorted, method = "grouped", cex = 0.01)
+plot(slim_rules_sorted, method = "graph", cex = 0.5)
+# plot(slim_rules_sorted, method = "graph", cex = 0.5, engine = 'interactive'
+#     #,control = list(k = 4)
+#     )
+#plotly_arules(rules) # <- deprecated
+inspectDT(slim_rules_sorted)
+
+# RESULT - 8225 rules
+
+
+
+# RESULT - 8225 rules
+# RESULT for Good - 6 rules
+#########################################################################################################
+
+```
+## ECLAT Model
+The second model attempted for association analysis was the ECLAT model.  As with Apriori, this model is part of the arules library and requires the source date to be formatted in the same way for generating the itemsets for the final rule induction process.  ECLAT was found to be faster than Apriori in processing the dataset, but quickly ran into memory limitations while building the itemsets.  To alleviate this, only the top 5 most commonly occurring game categories and game mechanics were kept as factors with all remaining categories and mechanics grouped under the corresponding “Other” columns to indicate other factors existed in the rows.  
+In terms of the rule analysis with ECLAT, the arules library does not provide a function or parameter to allow for filtering of the consequents resulting in a ruleset of over 87,000 entries.  Filtering of these records was done manually on the resulting data table produced by inspectDT().  In determining which rulesets would potentially produce a “Good” rating, those that most frequently occurred (Support > 0.15) had Confidence scores equivalent to chance (less than 0.52).  Those rules with higher Confidence scores (greater than 0.63) were much less likely to appear (Support less than 0.11) and relied on “Other” categories (ie. factors not in the top 5 most frequently occurring) to produce the scores.  Further research into these “Other” categories and their effects are required to determine their roles in the production of these scores.
+
+```{r, include=FALSE}
+# import the boardgame_data_with_expanded.csv source file
+dat <- read.csv(file="./boardgame_data_with_expanded.csv")
+# dim(dat)
+# str(dat)
+# summary(dat)
+
+
+########################################################################################################
+# Attempt 10 - ECLAT - combine both the top 5 category and mechanic attributes + OTHERS and category average
+########################################################################################################
+########################################################################################################
+
+dat_factors <- NULL
+dat_cats <- dat[,grep("attributes.boardgamecategory", colnames(dat))]
+
+# sum and sort the columns and totals to get the top cutoff
+col_totals_sorted <- sort(colSums(dat_cats), decreasing = TRUE)
+cutoff <- 5
+
+# add a column to indicate a category not in the top cutoff most common categories
+dat_cats$attributes.boardgamecategory_Others <- as.integer(0)
+
+# for each column not listed in the top "cutoff" columns, filter to show where they are used
+# and mark each record with 1 under the Others column
+for (i in names(col_totals_sorted[-(1:cutoff)])) {
+  dat_cats$attributes.boardgamecategory_Others[dat_cats[i]==1] <- as.integer(1)
+  
+}
+
+
+temp_others <- dat_cats$attributes.boardgamecategory_Others
+temp <- dat_cats[,names(col_totals_sorted[1:cutoff])]
+temp$attributes.boardgamecategory_Others <- temp_others
+dat_cats <- temp
+
+
+# mechanics section
+dat_mech <- dat[,grep("attributes.boardgamemechanic", colnames(dat))]
+
+# sum and sort the columns and totals to get the top cutoff
+col_totals_sorted <- sort(colSums(dat_mech), decreasing = TRUE)
+
+# add a column to indicate a category not in the top cutoff most common categories
+dat_mech$attributes.boardgamemechanic_Others <- as.integer(0)
+
+# for each column not listed in the top "cutoff" columns, filter to show where they are used
+# and mark each record with 1 under the Others column
+for (i in names(col_totals_sorted[-(1:cutoff)])) {
+  dat_mech$attributes.boardgamemechanic_Others[dat_mech[i]==1] <- as.integer(1)
+  
+}
+
+
+temp_others <- dat_mech$attributes.boardgamemechanic_Others
+temp <- dat_mech[,names(col_totals_sorted[1:cutoff])]
+temp$attributes.boardgamemechanic_Others <- temp_others
+dat_mech <- temp
+
+
+# combine the results into dat_factors
+dat_factors$stats.average = dat$stats.average
+
+# assign categories instead of values to stats.average
+dat_factors$stats.average[dat_factors$stats.average < 5] <- "Poor"
+dat_factors$stats.average[dat_factors$stats.average < 7] <- "Fair"
+dat_factors$stats.average[dat_factors$stats.average < 9.999] <- "Good"
+
+
+dat_factors <- cbind(dat_factors,  dat_cats, dat_mech)
+dat_factors$stats.average <- as.factor(dat_factors$stats.average)
+dat_factors[sapply(dat_factors, is.integer)] <- lapply(dat_factors[sapply(dat_factors, is.integer)], as.factor)
+
+# dim(dat_factors)
+# str(dat_factors)
+# summary(dat_factors)
+
+itemsets <- NULL
+itemsets<- eclat(dat_factors, parameter=list(support=0.03, maxlen = 5) )
+
+
+# build the rules
+rules <- NULL
+rules <- ruleInduction(itemsets, confidence = .80)
+
+sorted_rules <- sort(rules, by = "lift")
+
+slim_sort_eclat_rules <- sorted_rules[1:250, ]
+
+sorted_rules2 <- sort(slim_sort_eclat_rules, by = "support")
+
+slim_sort_eclat_rules2 <- sorted_rules2[1:100, ]
+
+```
+
+```{r, eval=TRUE}
+plot(slim_sort_eclat_rules2)
+#plotly_arules(rules) # <- deprecated
+#inspectDT(rules)
+
+# RESULT - success, but cannot filter on RHS
+
+#########################################################################################################
+
+```
+## FPGroup
+The final model attempted for association analysis was the FPGroup model.  This was the only model not part of the arules library (SparkR) and resulted in a different approach in the preparation of the data.  SparkR’s FPGroup requires all data used in the building of the itemsets to be combined into a List for each row under a single column.  In this case, the average score category, game categories, and game mechanics were combined into a single comma-separated value stored as a List.  FPGroup also requires each List to contain only unique items (e.g. a game category of “Memory” and a game mechanic of “Memory” could not both be added to the resulting List).  The resulting column is used in its own SparkR dataframe which in turn is used to build the FPGrowth model.  Overall, when excluding the time taken to start the SparkR session, this ran much more quickly than Apriori without having to resort to feature reduction as in ECLAT.
+Using the default parameters in FPGrowth produced no rulesets.  When applying a minimum Support of 0.1 and a minimum Confidence of 0.5, a small ruleset of 13 objects was produced.  Since FPGrowth also does not provide a means of filtering rulesets, we were forced to manually review the recordset to find any records with average rating “Good” consequents.  Two such records existed with both having better-than-chance Confidence scores (over 0.54) and a positive relationship in Lift scores (over 1.25).  One of these records simply had “Wargame” as its antecedent indicating that this may be the easiest way to get a “Good” rating.  More research is required to find out what other antecedents produced “Good” ratings.
+
+
+```{r, eval=FALSE}
+# this triggers a large download if not already installed
+if(! "SparkR" %in% installed.packages()) install.packages("SparkR", depend = TRUE)
+library(SparkR)
+
+# required to work with sparkr data frames
+sparkR.session()
+
+# import the final_clean_boardgame.csv source file
+dat <- read.csv(file="./final_clean_boardgame.csv")
+#dim(dat)
+#str(dat)
+#summary(dat)
+
+dat_factors <- NULL
+dat_factors$average = dat$average
+
+# assign categories instead of values to average
+dat_factors$average[dat_factors$average < 5] <- "Poor"
+dat_factors$average[dat_factors$average < 7] <- "Fair"
+dat_factors$average[dat_factors$average < 9.999] <- "Good"
+
+# add the category and mechanic data
+dat_factors$boardgamecategory <- as.character(dat$boardgamecategory)
+dat_factors$boardgamemechanic <- as.character(dat$boardgamemechanic)
+
+# combine all factors into a single column
+dat_factors$raw_items <- paste(dat_factors$average,dat_factors$boardgamecategory,dat_factors$boardgamemechanic,sep=",")
+
+# need to convert to a dataframe, then convert the raw_items to character
+dat_factors <- as.data.frame(dat_factors)
+dat_factors$raw_items <- as.character(dat_factors$raw_items)
+
+# need unique items within each cell of raw_items
+for (row in 1:nrow(dat_factors))
+{
+  templist <- as.list(strsplit(dat_factors[row,"raw_items"],","))
+  dat_factors[row, "raw_items"] <- toString(unique(unlist(templist)))
+  
+}
+
+# convert to a spark dataframe
+raw_data <- as.DataFrame(dat_factors)
+
+data <- selectExpr(raw_data, "split(raw_items, ',') as items")
+model <- spark.fpGrowth(data)
+ 
+# Show frequent itemsets
+frequent_itemsets <- spark.freqItemsets(model)
+showDF(frequent_itemsets)
+
+# Show association rules
+association_rules <- spark.associationRules(model)
+showDF(association_rules)
+
+# another attempt with more options added
+another_model <- spark.fpGrowth(data, minSupport = 0.1, minConfidence = 0.5, itemsCol = "items")#, numPartitions = 10)
+
+
+# Show frequent itemsets
+frequent_itemsets2 <- spark.freqItemsets(another_model)
+showDF(frequent_itemsets2)
+
+# Show association rules
+association_rules2 <- spark.associationRules(another_model)
+showDF(association_rules2)
+```
+
+Application using default parameters
+```
+#+---------------+----+
+#|          items|freq|
+#+---------------+----+
+#|[ Dice Rolling]| 988|
+#|         [Good]|1271|
+#|   [ Card Game]| 900|
+#|         [Fair]|1604|
+#+---------------+----+
+#+----------+----------+----------+----+
+#|antecedent|consequent|confidence|lift|
+#+----------+----------+----------+----+
+#+----------+----------+----------+----+
+
+```
+
+Application with minSupport=0.1 and minConfidence=0.5
+```
+#+--------------------+----+
+#|               items|freq|
+#+--------------------+----+
+#|         [ Fighting]| 454|
+#|  [ Science Fiction]| 379|
+#|     [ Dice Rolling]| 988|
+#|[ Dice Rolling, G...| 488|
+#|[ Dice Rolling, F...| 487|
+#|[ Variable Player...| 691|
+#|[ Variable Player...| 357|
+#|[ Variable Player...| 378|
+#|[ Variable Player...| 306|
+#|[ Area Control / ...| 323|
+#|  [ Hand Management]| 868|
+#|[ Hand Management...| 376|
+#|[ Hand Management...| 532|
+#|[ Hand Management...| 335|
+#|[ Hand Management...| 481|
+#|  [ Hex-and-Counter]| 341|
+#|[ Hex-and-Counter...| 316|
+#|[ Action Point Al...| 293|
+#|          [ Fantasy]| 582|
+#|    [ Fantasy, Fair]| 293|
+#+--------------------+----+
+#only showing top 20 rows
+#+--------------------+------------------+------------------+------------------+
+#|          antecedent|        consequent|        confidence|              lift|
+#+--------------------+------------------+------------------+------------------+
+#|  [ Card Game, Fair]|[ Hand Management]|0.5706984667802385|1.9211761750367016|
+#|  [ Hex-and-Counter]|        [ Wargame]|0.9266862170087976| 4.172229778273816|
+#|[ Hand Management...|      [ Card Game]|0.6964656964656964| 2.261191961191961|
+#|        [ Card Game]|[ Hand Management]|0.5911111111111111|1.9898924731182799|
+#|        [ Card Game]|            [Fair]|0.6522222222222223|1.1881504571903576|
+#|[ Variable Player...|   [ Dice Rolling]| 0.516642547033285|1.5279651036753634|
+#|[ Variable Player...|            [Good]|0.5470332850940666|1.2576170409479641|
+#|[ Hand Management...|            [Fair]|0.6296992481203008|1.1471204507528172|
+#|          [ Wargame]|   [ Dice Rolling]|0.5315870570107858|1.5721633406735993|
+#|          [ Wargame]|            [Good]| 0.588597842835131| 1.353173010829467|
+#|          [ Fantasy]|            [Fair]|0.5034364261168385|0.9171080031879065|
+#|  [ Hand Management]|      [ Card Game]|0.6129032258064516|1.9898924731182794|
+#|  [ Hand Management]|            [Fair]| 0.554147465437788|1.0094880885344244|
+#+--------------------+------------------+------------------+------------------+
+```
+_Note: FPGrowth codes requires a manual run as this will call the installation and call of a SparkR session_    
+
+# Deployment Discussion
+The models developed in this project was used to create Shiny application currently deployed at
+https://group4-afsmst.shinyapps.io/group4lab1/. Datasets and Code of the application are found in https://github.com/SgtAngle/Group4Lab1
+
+The deployment of this work lies in integration into the data preparation stage of the binary classification model.  A function would be written which takes a rule as input and creates a binary feature which represents whether a given observation did or did not meet the criteria for that rule.  These columns could either be reduced to one column to decrease computational burden,  or the rules could be kept separate in order to facilitate the groupings and placement of CK's products on their website, or some combination thereof.  Either way, the results would be joined into the data frame fed into the SVM mode, and while testing lies beyond the time constraints and scope of this project, it seems likely that such an inclusion would be able to reduce the frequency of false negatives, by catching games that fit into popular categorical/mechanic rules groups, but which suffer from unusual player counts and play times.
+
+# Upkeep Requirements
+The same rules which applied to the classification models apply to the association rules mining, which is to say that it only needs to be run once per financial quarter. This is due to the latency of average scores on BBG, which are the primary means of producing the rules, and which can take months to stabilize after a game’s publication. It could theoretically undergo more frequent training, but this would likely be to the detriment of the model. 
+
+
